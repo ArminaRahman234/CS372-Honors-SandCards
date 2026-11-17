@@ -14,8 +14,14 @@ export default function App() {
       setRoomData(data);
     });
 
+    // Listen for live card/table state changes (shuffle, deal, play, move, flip, reset)
+    socket.on('game_state_updated', (updatedGameState) => {
+      setRoomData((prev) => (prev ? { ...prev, gameState: updatedGameState } : prev));
+    });
+
     return () => {
       socket.off('room_updated');
+      socket.off('game_state_updated');
     };
   }, []);
 
