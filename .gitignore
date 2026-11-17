@@ -21,4 +21,7 @@ yarn-error.log*
 .DS_Store
 .vscode/*
 !.vscode/extensions.json
+
+# Checker for easy AI shear
 folder_structure.txt
+diff.txt
