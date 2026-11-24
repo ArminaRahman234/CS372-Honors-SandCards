@@ -117,6 +117,7 @@ app.post('/api/rooms/create', async (req, res) => {
     const newRoom = {
       code: roomCode,
       hostKey: hostKey,
+      hostId: null,
       dealerId: null,
       createdAt: new Date(),
       players: [],
@@ -153,6 +154,7 @@ app.get('/api/rooms/:roomId', async (req, res) => {
         success: true,
         roomCode: activeRoom.code,
         players: activeRoom.players,
+        hostId: activeRoom.hostId,
         dealerId: activeRoom.dealerId,
         gameState: activeRoom.gameState,
       });
@@ -177,6 +179,7 @@ app.get('/api/rooms/:roomId', async (req, res) => {
     const restoredRoom = {
       code: savedRoom.roomId,
       hostKey: savedRoom.hostKey,
+      hostId: null,
       dealerId: null,
       createdAt: savedRoom.createdAt,
       players: [],
@@ -189,6 +192,7 @@ app.get('/api/rooms/:roomId', async (req, res) => {
       success: true,
       roomCode: restoredRoom.code,
       players: restoredRoom.players,
+      hostId: restoredRoom.hostId,
       dealerId: restoredRoom.dealerId,
       gameState: restoredRoom.gameState,
     });
@@ -217,6 +221,7 @@ io.on('connection', (socket) => {
           room = {
             code: savedRoom.roomId,
             hostKey: savedRoom.hostKey,
+            hostId: null,
             dealerId: null,
             createdAt: savedRoom.createdAt,
             players: [],
@@ -254,6 +259,9 @@ io.on('connection', (socket) => {
       if (savedData) {
         delete room.gameState.savedPlayers[newPlayer.username];
       }
+      if (!room.hostId) {
+        room.hostId = socket.id;
+      }
       if (!room.dealerId) {
         room.dealerId = socket.id;
       }
@@ -265,6 +273,7 @@ io.on('connection', (socket) => {
     io.to(normalizedCode).emit('room_updated', {
       roomCode: room.code,
       players: room.players,
+      hostId: room.hostId,
       dealerId: room.dealerId,
     });
 
@@ -273,10 +282,15 @@ io.on('connection', (socket) => {
     broadcastGameState(normalizedCode, room);
   });
 
-  // Event: Shuffle remaining deck
+  // Event: Shuffle remaining deck (Dealer only)
   socket.on('shuffle_deck', ({ roomCode }) => {
     const room = rooms.get(roomCode);
     if (!room) return;
+
+    if (room.dealerId !== socket.id) {
+      socket.emit('error_message', 'Only the designated Dealer can shuffle the deck.');
+      return;
+    }
 
     shuffleDeck(room.gameState.deck);
     const actor = room.players.find((p) => p.id === socket.id)?.username || 'Someone';
@@ -328,12 +342,15 @@ io.on('connection', (socket) => {
   });
 
   // Event: Drag/move an existing card on the table
-  socket.on('move_card', ({ roomCode, cardId, x, y }) => {
+  socket.on('move_card', ({ roomCode, cardId, x, y, isFinal = false }) => {
     const room = rooms.get(roomCode);
     if (!room) return;
 
     moveTableCard(room.gameState, cardId, x, y);
     broadcastGameState(roomCode, room);
+    if (isFinal) {
+      saveRoomState(roomCode, room.gameState);
+    }
   });
 
   // Event: Flip a table card face-up / face-down
@@ -350,10 +367,15 @@ io.on('connection', (socket) => {
     saveRoomState(roomCode, room.gameState);
   });
 
-  // Event: Reset entire table back to a fresh 52-card shuffled deck
+  // Event: Reset entire table back to a fresh 52-card shuffled deck (Dealer only)
   socket.on('reset_game', ({ roomCode }) => {
     const room = rooms.get(roomCode);
     if (!room) return;
+
+    if (room.dealerId !== socket.id) {
+      socket.emit('error_message', 'Only the designated Dealer can reset the table.');
+      return;
+    }
 
     const freshState = createInitialGameState();
     room.players.forEach((p) => {
@@ -368,10 +390,15 @@ io.on('connection', (socket) => {
     saveRoomState(roomCode, room.gameState);
   });
 
-  // Event: Adjust a player's score in Custom Score Tracking
+  /// Event: Adjust a player's score in Custom Score Tracking (Dealer only)
   socket.on('update_score', ({ roomCode, targetPlayerId, delta }) => {
     const room = rooms.get(roomCode);
     if (!room) return;
+
+    if (room.dealerId !== socket.id) {
+      socket.emit('error_message', 'Only the designated Dealer can adjust scores.');
+      return;
+    }
 
     const currentScore = room.gameState.scores[targetPlayerId] ?? 0;
     room.gameState.scores[targetPlayerId] = currentScore + delta;
@@ -418,6 +445,7 @@ io.on('connection', (socket) => {
     io.to(roomCode).emit('room_updated', {
       roomCode: room.code,
       players: room.players,
+      hostId: room.hostId,
       dealerId: room.dealerId,
     });
 
@@ -469,6 +497,7 @@ io.on('connection', (socket) => {
     io.to(roomCode).emit('room_updated', {
       roomCode: room.code,
       players: room.players,
+      hostId: room.hostId,
       dealerId: room.dealerId,
     });
 
@@ -503,6 +532,50 @@ io.on('connection', (socket) => {
     socket.emit('session_saved', { message: 'Session saved successfully!' });
   });
 
+  // Event: Player explicitly clicks "Leave Room"
+  socket.on('leave_room', ({ roomCode }) => {
+    const normalizedCode = roomCode?.trim().toUpperCase();
+    const room = rooms.get(normalizedCode);
+    if (!room) return;
+
+    const index = room.players.findIndex((p) => p.id === socket.id);
+    if (index !== -1) {
+      const departingPlayer = room.players[index];
+
+      if (!room.gameState.savedPlayers) {
+        room.gameState.savedPlayers = {};
+      }
+      room.gameState.savedPlayers[departingPlayer.username] = {
+        hand: room.gameState.hands[socket.id] || [],
+        score: room.gameState.scores[socket.id] ?? 0,
+      };
+
+      room.players.splice(index, 1);
+      delete room.gameState.hands[socket.id];
+      delete room.gameState.scores[socket.id];
+
+      if (room.hostId === socket.id) {
+        room.hostId = null;
+      }
+      if (room.dealerId === socket.id) {
+        room.dealerId = null;
+      }
+
+      socket.leave(normalizedCode);
+
+      io.to(normalizedCode).emit('room_updated', {
+        roomCode: room.code,
+        players: room.players,
+        hostId: room.hostId,
+        dealerId: room.dealerId,
+      });
+
+      logAction(room, `${departingPlayer.username} left the room.`);
+      broadcastGameState(normalizedCode, room);
+      saveRoomState(normalizedCode, room.gameState);
+    }
+  });
+
   // Event: Handle socket disconnection
   socket.on('disconnect', () => {
     console.log(`Client disconnected: ${socket.id}`);
@@ -526,6 +599,9 @@ io.on('connection', (socket) => {
       delete room.gameState.hands[socket.id];
       delete room.gameState.scores[socket.id];
 
+      if (room.hostId === socket.id) {
+        room.hostId = null;
+      }
       if (room.dealerId === socket.id) {
         room.dealerId = null;
       }
@@ -533,6 +609,7 @@ io.on('connection', (socket) => {
       io.to(roomCode).emit('room_updated', {
         roomCode: room.code,
         players: room.players,
+        hostId: room.hostId,
         dealerId: room.dealerId,
       });
       

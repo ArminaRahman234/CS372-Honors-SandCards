@@ -7,11 +7,23 @@ import './index.css';
 
 export default function App() {
   const [roomData, setRoomData] = useState(null);
+  const [mySocketId, setMySocketId] = useState(() => socket.id || '');
 
   useEffect(() => {
-    // Keep listener active for all incoming room updates (joins/leaves)
+    const syncSocketId = () => setMySocketId(socket.id || '');
+    socket.on('connect', syncSocketId);
+
+    // Keep listener active for all incoming room updates (joins/leaves/kicks)
     socket.on('room_updated', (data) => {
-      setRoomData(data);
+      setMySocketId(socket.id || '');
+      if (data?.roomCode && window.location.pathname !== `/room/${data.roomCode}`) {
+        window.history.replaceState(null, '', `/room/${data.roomCode}`);
+      }
+      setRoomData((prev) => ({
+        ...prev,
+        ...data,
+        gameState: data.gameState ?? prev?.gameState,
+      }));
     });
 
     // Listen for live card/table state changes (shuffle, deal, play, move, flip, reset)
@@ -20,12 +32,17 @@ export default function App() {
     });
 
     return () => {
+      socket.off('connect', syncSocketId);
       socket.off('room_updated');
       socket.off('game_state_updated');
     };
   }, []);
 
   const handleLeaveRoom = () => {
+    if (roomData?.roomCode) {
+      socket.emit('leave_room', { roomCode: roomData.roomCode });
+    }
+    window.history.replaceState(null, '', '/');
     setRoomData(null);
     window.location.reload();
   };
@@ -35,7 +52,11 @@ export default function App() {
       {!roomData ? (
         <Lobby />
       ) : (
-        <Room roomData={roomData} onLeaveRoom={handleLeaveRoom} />
+        <Room
+          roomData={roomData}
+          mySocketId={mySocketId}
+          onLeaveRoom={handleLeaveRoom}
+        />
       )}
     </main>
   );
